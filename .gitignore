@@ -28,6 +28,7 @@ dist/
 frontend/dist/
 .dist/
 build/
+.firebase/
 
 # Local databases and logs
 chroma_db/

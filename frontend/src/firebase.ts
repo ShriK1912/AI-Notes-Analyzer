@@ -4,7 +4,7 @@ import { getFirestore } from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 import { getFunctions } from "firebase/functions";
 import { getAnalytics, isSupported } from "firebase/analytics";
-import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
+import { initializeAppCheck, ReCaptchaV3Provider, type AppCheck } from "firebase/app-check";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -26,11 +26,17 @@ if (import.meta.env.DEV && import.meta.env.VITE_APPCHECK_DEBUG_TOKEN === "true")
   self.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
 }
 
-if (import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY) {
-  initializeAppCheck(app, {
-    provider: new ReCaptchaV3Provider(import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY),
-    isTokenAutoRefreshEnabled: true,
-  });
+export let appCheck: AppCheck | null = null;
+
+if (typeof window !== "undefined" && import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY) {
+  try {
+    appCheck = initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(import.meta.env.VITE_RECAPTCHA_V3_SITE_KEY),
+      isTokenAutoRefreshEnabled: true,
+    });
+  } catch (err) {
+    console.warn("App Check initialization error:", err);
+  }
 }
 
 // ─── Core services ────────────────────────────────────────────────────────────

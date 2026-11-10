@@ -1,5 +1,6 @@
 import axios from "axios";
-import { auth } from "../firebase";
+import { auth, appCheck } from "../firebase";
+import { getToken } from "firebase/app-check";
 
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1",
@@ -20,6 +21,15 @@ const attachToken = async (config: any) => {
       const token = await user.getIdToken(false);
       config.headers.Authorization = `Bearer ${token}`;
       config.headers["x-user-id"] = user.uid;
+    }
+    // Attach Firebase App Check token if configured
+    if (appCheck) {
+      try {
+        const appCheckToken = await getToken(appCheck, /* forceRefresh= */ false);
+        config.headers["X-Firebase-AppCheck"] = appCheckToken.token;
+      } catch (appCheckErr) {
+        console.warn("App Check token retrieval skipped:", appCheckErr);
+      }
     }
   } catch (err) {
     console.warn("Failed to attach Firebase token:", err);
