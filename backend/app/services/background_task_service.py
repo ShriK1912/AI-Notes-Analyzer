@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 from firebase_admin import firestore
+from app.core.database import get_db
 from app.services.extraction_service import (
     rasterize_page, 
     extract_text_from_page, 
@@ -28,7 +29,7 @@ async def run_ocr_pipeline(
     Background task to process a PDF page-by-page, perform OCR/extraction,
     and index the result once complete.
     """
-    db = firestore.client()
+    db = get_db()
     job_ref = db.collection("jobs").document(job_id)
     
     try:

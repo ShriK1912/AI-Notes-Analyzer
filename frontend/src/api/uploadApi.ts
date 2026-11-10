@@ -1,5 +1,6 @@
 import apiClient, { uploadAxios } from "./axios";
 import { auth } from "../firebase";
+import { trackDocumentUpload, trackUrlUpload } from "../lib/analytics";
 
 export const uploadApi = {
   async uploadNotes(file: File, subjectId: string): Promise<{ job_id: string }> {
@@ -17,6 +18,7 @@ export const uploadApi = {
         "Authorization": `Bearer ${token}`
       }
     });
+    trackDocumentUpload(subjectId, file.name.split(".").pop() ?? "unknown");
     return res.data as { job_id: string };
   },
 
@@ -35,6 +37,7 @@ export const uploadApi = {
         "Authorization": `Bearer ${token}`
       }
     });
+    trackUrlUpload(subjectId);
     return res.data as any;
   },
 };

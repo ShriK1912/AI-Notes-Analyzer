@@ -2,6 +2,7 @@ import apiClient from "./axios";
 import { auth } from "../firebase";
 import type { AnswerPayload } from "../types/document";
 import type { Subject } from "../types/subject";
+import { trackQuestionAsked, trackAnswerReceived } from "../lib/analytics";
 
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -51,6 +52,7 @@ export const qaApi = {
     const token = await user.getIdToken();
 
     try {
+      trackQuestionAsked(subject.id);
       const res = await apiClient.post("/qa/ask", {
         subjectId: subject.id,
         question,
@@ -58,7 +60,9 @@ export const qaApi = {
       }, {
         headers: { "Authorization": `Bearer ${token}` }
       });
-      return normalizeResponse(res.data as Partial<AnswerPayload>, subject.name);
+      const result = normalizeResponse(res.data as Partial<AnswerPayload>, subject.name);
+      trackAnswerReceived(subject.id, result.confidenceTier as "HIGH" | "MEDIUM" | "LOW" | "NOT_FOUND");
+      return result;
     } catch (error) {
       console.error("QA API Error", error);
       throw error;

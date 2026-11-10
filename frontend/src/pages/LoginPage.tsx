@@ -21,9 +21,12 @@ const LoginPage = () => {
         try {
             if (isRegister) {
                 await authApi.register({ name: name.trim(), email: email.trim(), password });
+                const res = await authApi.login({ email: email.trim(), password });
+                authStore.loginNew(res.user.name, res.token, res.user);
+            } else {
+                const res = await authApi.login({ email: email.trim(), password });
+                authStore.login(res.user.name, res.token, res.user);
             }
-            const res = await authApi.login({ email: email.trim(), password });
-            authStore.login(res.user.name, res.token, res.user);
         } catch (err) {
             setError(err instanceof Error ? err.message : "Authentication failed. Try again.");
         } finally {

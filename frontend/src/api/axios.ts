@@ -3,7 +3,7 @@ import { auth } from "../firebase";
 
 const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? "http://localhost:8000/api/v1",
-  timeout: 120000,
+  timeout: 300000, // 5 minutes to accommodate API retries
 });
 
 // Always attach a fresh Firebase token before every request

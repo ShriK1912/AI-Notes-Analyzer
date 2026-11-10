@@ -16,27 +16,49 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Initialize Firebase Admin SDK
+    # Supports three credential sources (in priority order):
+    #   1. FIREBASE_SERVICE_ACCOUNT_JSON env var — JSON string (ideal for Render/Railway)
+    #   2. File path via GOOGLE_APPLICATION_CREDENTIALS / FIREBASE_SERVICE_ACCOUNT_PATH
+    #   3. Application Default Credentials (GCP, gcloud auth)
     try:
         if not firebase_admin._apps:
-            import os
+            import os, json
+
+            sa_json_str = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
             service_account_path = settings.GOOGLE_APPLICATION_CREDENTIALS or settings.FIREBASE_SERVICE_ACCOUNT_PATH
-            
-            if service_account_path and os.path.exists(service_account_path):
-                # Ensure the environment variable is set for other Google Cloud libraries (like Firestore)
+
+            FIREBASE_OPTIONS = {
+                'databaseURL': 'https://ai-notes-analyser-default-rtdb.firebaseio.com',
+                'projectId': 'ai-notes-analyser',
+            }
+
+            if sa_json_str:
+                # Option 1: JSON string env var — used on Render, Railway, etc.
+                try:
+                    sa_dict = json.loads(sa_json_str)
+                    cred = credentials.Certificate(sa_dict)
+                    firebase_admin.initialize_app(cred, FIREBASE_OPTIONS)
+                    logger.info("Firebase Admin initialized from FIREBASE_SERVICE_ACCOUNT_JSON env var")
+                except Exception as e:
+                    logger.error(f"Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON: {e}")
+                    raise
+
+            elif service_account_path and os.path.exists(service_account_path):
+                # Option 2: JSON file on disk — used locally
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath(service_account_path)
                 cred = credentials.Certificate(service_account_path)
-                firebase_admin.initialize_app(cred)
-                logger.info(f"Firebase Admin initialized with service account: {service_account_path}")
+                firebase_admin.initialize_app(cred, FIREBASE_OPTIONS)
+                logger.info(f"Firebase Admin initialized with service account file: {service_account_path}")
+
             else:
-                # Fallback: try Application Default Credentials (works on GCP / if gcloud auth is set)
+                # Option 3: Application Default Credentials (GCP environments)
                 try:
                     firebase_admin.initialize_app()
                     logger.info("Firebase Admin initialized via Application Default Credentials")
                 except Exception as inner_e:
-                    logger.warning(f"Failed to auto-discover Application Default Credentials. (This is expected in CI/Demo if no JSON is provided). Error: {inner_e}")
-                    # Initialize empty so the app boots for the Demo script, but database writes will fail if not actually authenticated.
-                    logger.warning("Initializing mock firebase admin app for UI startup.")
+                    logger.warning(f"No Firebase credentials found ({inner_e}). Booting in demo mode — Firestore writes will fail.")
                     firebase_admin.initialize_app(options={'projectId': 'demo-project'})
+
     except Exception as e:
         logger.warning(f"Firebase Admin initialization failed: {e}")
     yield
@@ -52,12 +74,16 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        # Local development
         "http://localhost:5173",
         "http://localhost:5174",
+        "http://localhost:5175",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:5174",
-        "http://localhost:5175",
         "http://127.0.0.1:5175",
+        # Firebase Hosting (production)
+        "https://ai-notes-analyser.web.app",
+        "https://ai-notes-analyser.firebaseapp.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],

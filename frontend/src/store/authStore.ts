@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { trackLogin, trackSignUp } from "../lib/analytics";
 
 interface User {
   id: string;
@@ -41,6 +42,15 @@ export const authStore = {
     state = { isAuthenticated: true, token, user: { ...user, name } };
     localStorage.setItem(TOKEN_KEY, token);
     localStorage.setItem(USER_KEY, JSON.stringify(state.user));
+    trackLogin("email");
+    notify();
+  },
+  loginNew(name: string, token: string, user: User) {
+    // Called after register — fires sign_up event instead of login
+    state = { isAuthenticated: true, token, user: { ...user, name } };
+    localStorage.setItem(TOKEN_KEY, token);
+    localStorage.setItem(USER_KEY, JSON.stringify(state.user));
+    trackSignUp("email");
     notify();
   },
   logout() {

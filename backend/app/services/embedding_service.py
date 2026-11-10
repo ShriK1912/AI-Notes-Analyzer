@@ -123,6 +123,22 @@ async def embed_query(query: str) -> list[float]:
     embeddings = await _embed_with_retry([query], TASK_TYPE_QUERY)
     return embeddings[0]
 
+async def embed_queries(queries: list[str]) -> list[list[float]]:
+    """
+    Embed multiple user queries with RETRIEVAL_QUERY task type in a single API call.
+    
+    Args:
+        queries: List of query strings
+        
+    Returns:
+        List of query embedding vectors
+    """
+    if not queries:
+        return []
+    
+    logger.info(f"Embedding {len(queries)} queries at once...")
+    return await _embed_with_retry(queries, TASK_TYPE_QUERY)
+
 async def _embed_with_retry(texts: list[str], task_type: str) -> list[list[float]]:
     """
     Helper function to embed texts with exponential backoff retry logic.

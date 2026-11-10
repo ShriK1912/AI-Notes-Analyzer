@@ -1,10 +1,12 @@
+# ─── Core requirements (always installed — Render free tier safe) ──────────────
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
 pydantic-settings
 python-dotenv
 python-multipart
 google-generativeai
+google-genai
 firebase-admin
 langchain
 langchain-text-splitters
@@ -12,11 +14,8 @@ PyMuPDF
 python-docx
 python-pptx
 Pillow
-easyocr
 numpy
 certifi
 dnspython
 httpx
 beautifulsoup4
-google-genai
-opencv-python-headless

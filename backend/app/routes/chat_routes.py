@@ -7,6 +7,7 @@ from app.utils.user_context import resolve_user_id
 
 import firebase_admin
 from firebase_admin import firestore
+from app.core.database import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,7 +26,7 @@ async def chat_with_docs(req: ChatRequest, request: Request):
     user_id = resolve_user_id(request)
     
     # Verify Subject
-    db = firestore.client()
+    db = get_db()
     subj_ref = db.collection("users").document(user_id).collection("subjects").document(req.subjectId).get()
     if not subj_ref.exists:
         raise HTTPException(status_code=404, detail="Subject not found")

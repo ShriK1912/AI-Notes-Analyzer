@@ -1,6 +1,6 @@
 {
   "projects": {
-    "default": "askmynotes-noesis"
+    "default": "ai-notes-analyser"
   },
   "targets": {},
   "etags": {}

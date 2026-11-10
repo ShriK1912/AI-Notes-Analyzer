@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import re
+import random
 from google import genai
 import os
 import numpy as np
@@ -14,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 NOT_FOUND_TEMPLATE = "Not found in your notes for {subject_name}"
 CONFIDENCE_THRESHOLDS = {"NOT_FOUND": 0.35, "LOW": 0.55, "MEDIUM": 0.75, "HIGH": 1.00}
-GENERATION_MODEL = "models/gemini-flash-latest"
+GENERATION_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite"]
+GENERATION_MODEL = GENERATION_MODELS[0]
 
 class RAGError(Exception):
     pass
@@ -22,18 +24,45 @@ class RAGError(Exception):
 print(f"DEBUG: rag_service initializing with key: {settings.GEMINI_API_KEY[:10]}...")
 _client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
+MAX_GEN_RETRIES = 4
+GEN_BASE_DELAY = 2.0  # seconds
+
+async def _generate_with_retry(prompt: str) -> str:
+    """Call Gemini generation with multi-model fallback and backoff on 503/429 errors."""
+    last_error = None
+    for attempt in range(MAX_GEN_RETRIES):
+        for model in GENERATION_MODELS:
+            try:
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(
+                    None, lambda m=model: _client.models.generate_content(model=m, contents=prompt)
+                )
+                text = (response.text or "").strip()
+                if text:
+                    return text
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    logger.warning(f"Model {model} hit transient error ({error_str[:80]}). Trying fallback/retry...")
+                    continue
+                else:
+                    raise
+        
+        # If all models hit quota/capacity, back off before next attempt
+        wait = GEN_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+        retry_match = re.search(r"'retryDelay':\s*'(\d+)s'", str(last_error))
+        if retry_match:
+            wait = min(int(retry_match.group(1)) + 1, 60)
+        logger.warning(f"Gemini API attempt {attempt+1}/{MAX_GEN_RETRIES} failed ({str(last_error)[:80]}). Retrying in {wait:.1f}s...")
+        await asyncio.sleep(wait)
+
+    raise RAGError(f"Gemini API failed after {MAX_GEN_RETRIES} retries: {last_error}")
+
 async def _generate_multi_queries(query: str, subject_name: str) -> list[str]:
-    prompt = f"""You are a study assistant for the subject "{subject_name}". 
-The student asked: "{query}"\nGenerate 3 alternative versions of this question optimized for semantic search. Output ONLY the 3 questions, one per line."""
-    try:
-        loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None, lambda: _client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
-        )
-        queries = [q.strip() for q in response.text.strip().split('\n') if q.strip()]
-        return list(dict.fromkeys([query] + queries[:3]))
-    except Exception:
-        return [query]
+    # To conserve the 5 requests-per-minute Free Tier quota, avoid burning an extra LLM call
+    # on query rewriting. Semantic retrieval using gemini-embedding-001 accurately matches natural queries.
+    return [query]
 
 def _preprocess_query(query: str):
     query = re.sub(r'\s+', ' ', query).strip()
@@ -69,10 +98,14 @@ async def ask_question(query: str, subject_id: str, subject_name: str, user_id: 
     
     try:
         scored_chunks = []
-        for q in multi_queries:
-            q_emb = await embed_query(q)
+        # Batch embed all queries to save API calls
+        from app.services.embedding_service import embed_queries
+        query_embeddings = await embed_queries(multi_queries)
+        
+        for q, q_emb in zip(multi_queries, query_embeddings):
             results = find_similar_chunks(userId=user_id, subjectId=subject_id, query_embedding=q_emb, limit=5)
             
+            logger.info(f"Results for query: {q} -> count: {len(results)}")
             for c in results:
                 # find_nearest returns a distance (0 is exact match, higher is less similar). Sim = 1.0 - distance
                 dist = c.get("vector_distance")
@@ -98,6 +131,8 @@ async def ask_question(query: str, subject_id: str, subject_name: str, user_id: 
         logger.error(f"Vector search failed: {e}")
         raise RAGError(str(e))
 
+    logger.info(f"RAG: Deduplicated chunks -> {len(chunk_dicts)}")
+
     conf = compute_confidence([c["similarity"] for c in chunk_dicts], keywords, [c.get("text","") for c in chunk_dicts])
     if conf["tier"] in ("NOT_FOUND", "LOW"):
         # We can still try to have the LLM answer, but with low confidence
@@ -109,9 +144,7 @@ async def ask_question(query: str, subject_id: str, subject_name: str, user_id: 
     prompt = f"RULES:\n1. ONLY use sources below. If not found, output EXACTLY: {NOT_FOUND_TEMPLATE.format(subject_name=subject_name)}\n2. Cite sources using [SOURCE: filename, location].\n3. Confidence is {conf['tier']}.\nHISTORY:\n{hist}\nSOURCES:\n{sources}\nQUERY: {query}"
 
     try:
-        loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(None, lambda: _client.models.generate_content(model=GENERATION_MODEL, contents=prompt))
-        ans = (resp.text or "").strip()
+        ans = await _generate_with_retry(prompt)
     except Exception as e:
         raise RAGError(f"Gen failed: {e}")
 

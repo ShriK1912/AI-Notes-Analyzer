@@ -1,18 +1,37 @@
+# Python bytecode and caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.pytest_cache/
 
-# Firebase and Google Cloud secrets
+# Firebase and Google Cloud credentials (NEVER COMMIT)
 backend/firebase-service-account.json
-service-account*.json
+*service-account*.json
 *.json.bak
 
-# Environment and Build Folders
+# Environment variable files (NEVER COMMIT)
+*.env
+*.env.*
+!.env.example
+!frontend/.env.example
+!backend/.env.example
+
+# Dependencies and virtual environments
 node_modules/
+frontend/node_modules/
 .venv/
 venv/
+backend/venv/
+
+# Build outputs
 dist/
+frontend/dist/
 .dist/
+build/
+
+# Local databases and logs
 chroma_db/
+backend/chroma_db/
 logs/
-*.env
-.env.*
+*.log
+backend/*.log

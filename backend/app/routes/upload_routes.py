@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, BackgroundTasks
 
 from app.core.database import get_db
-# Restoring FastAPI routes but adapting to use Firebase 
 from firebase_admin import firestore, storage
 from app.services.chunking_service import chunk_text
 from app.services.embedding_service import embed_chunks
@@ -91,7 +90,7 @@ async def upload_document(
     subjectId: str = Form(...), 
     file: UploadFile = File(...)
 ):
-    db = firestore.client()
+    db = get_db()
     user_id = resolve_user_id(request)
     await _ensure_subject(db, subjectId, user_id)
 
@@ -136,7 +135,7 @@ async def upload_document(
 
 @router.get("/status/{job_id}")
 async def get_job_status(job_id: str, request: Request):
-    db = firestore.client()
+    db = get_db()
     user_id = resolve_user_id(request)
     # Note: Status check via GET is less used now with onSnapshot but kept for compatibility
     # However we'd need subjectId here to find it. For now, since it's just a GET, 
@@ -154,7 +153,7 @@ async def get_job_status(job_id: str, request: Request):
 
 @router.post("/url")
 async def upload_url(request: Request, subjectId: str = Form(...), url: str = Form(...)):
-    db = firestore.client()
+    db = get_db()
     user_id = resolve_user_id(request)
     await _ensure_subject(db, subjectId, user_id)
 
@@ -167,7 +166,7 @@ async def upload_url(request: Request, subjectId: str = Form(...), url: str = Fo
 
 @router.get("/documents/{subject_id}")
 async def list_documents(subject_id: str, request: Request):
-    db = firestore.client()
+    db = get_db()
     user_id = resolve_user_id(request)
     docs_ref = db.collection("users").document(user_id).collection("subjects").document(subject_id).collection("documents")
     docs = [doc.to_dict() for doc in docs_ref.get()]
@@ -175,7 +174,7 @@ async def list_documents(subject_id: str, request: Request):
 
 @router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: str, request: Request, subjectId: str):
-    db = firestore.client()
+    db = get_db()
     user_id = resolve_user_id(request)
     
     from google.cloud.firestore_v1.base_query import FieldFilter

@@ -1,0 +1,11 @@
+# ─── Optional: Local development extras ───────────────────────────────────────
+# Install these for the best local OCR quality (handwriting, scanned PDFs).
+# NOT needed on Render/Railway — the app auto-falls back to Gemini Vision OCR.
+#
+# Usage:
+#   pip install -r requirements.txt             # production / Render
+#   pip install -r requirements.local.txt       # local dev (adds EasyOCR + OpenCV)
+
+easyocr
+opencv-python-headless
+

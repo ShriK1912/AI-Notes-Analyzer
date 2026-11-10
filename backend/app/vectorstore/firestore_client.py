@@ -1,11 +1,12 @@
 from firebase_admin import firestore
+from app.core.database import get_db
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.vector import Vector
 from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
 
 def get_firestore_client():
-    """Retrieve the initialized Firestore client."""
-    return firestore.client()
+    """Retrieve the initialized Firestore client (named 'neww' database)."""
+    return get_db()
 
 def store_chunk(userId: str, subjectId: str, documentId: str, chunkId: str, chunk_data: dict, embedding: list[float]):
     """
@@ -25,41 +26,55 @@ def store_chunk(userId: str, subjectId: str, documentId: str, chunkId: str, chun
     doc_ref.set(chunk_data)
     return chunk_id
 
+import numpy as np
+
 def find_similar_chunks(userId: str, subjectId: str, query_embedding: list[float], limit: int = 5):
     """
     Perform a vector search (KNN) on chunks belonging to a specific subject.
-    Note: Requires a composite index for the 'subjectId' filter and 'embedding' vector field.
+    Since creating a Firestore vector index requires permissions we don't have,
+    this fetches all chunks for the subject and computes cosine similarity in-memory.
     """
     db = get_firestore_client()
     
-    # We query the Subcollection Group "chunks" (if using collectionGroup) 
-    # OR we query the specific document chunks. Since chunks are under specific documents,
-    # the best way to do subject-level search is a CollectionGroup query filtered by subjectId.
+    chunks_ref = db.collection("users").document(userId).collection("subjects").document(subjectId).collection("chunks")
+    chunks = chunks_ref.stream()
     
-    # Requires an index on `subjectId` (ASC) and `embedding` (VECTOR)
-    chunks_group = db.collection_group("chunks")
-    
-    # Filter by user and subject to ensure tenant isolation
-    query = chunks_group.where(filter=FieldFilter("userId", "==", userId)) \
-                        .where(filter=FieldFilter("subjectId", "==", subjectId)) \
-                        .find_nearest(
-                            vector_field="embedding",
-                            query_vector=Vector(query_embedding),
-                            distance_measure=DistanceMeasure.COSINE,
-                            limit=limit,
-                            distance_result_field="vector_distance"
-                        )
-    
-    docs = query.stream()
-    
-    results = []
-    for doc in docs:
-        data = doc.to_dict()
-        # Remove embedding from output to save bandwidth
+    all_chunks = []
+    for chunk in chunks:
+        data = chunk.to_dict()
         if "embedding" in data:
-            del data["embedding"]
-            
-        data["id"] = doc.id
-        results.append(data)
+            all_chunks.append((chunk.id, data))
+                
+    if not all_chunks:
+        return []
         
-    return results
+    q_vec = np.array(query_embedding)
+    q_norm = np.linalg.norm(q_vec)
+    
+    if q_norm == 0:
+        return []
+        
+    results = []
+    for chunk_id, data in all_chunks:
+        emb = data.get("embedding")
+        # Handle Firestore Vector object or plain list
+        emb_list = list(emb) if hasattr(emb, "__iter__") else emb
+        
+        c_vec = np.array(emb_list)
+        c_norm = np.linalg.norm(c_vec)
+        
+        if c_norm > 0:
+            sim = np.dot(q_vec, c_vec) / (q_norm * c_norm)
+        else:
+            sim = 0.0
+            
+        del data["embedding"]
+        data["id"] = chunk_id
+        # distance is 1 - similarity (cosine distance)
+        data["vector_distance"] = 1.0 - sim 
+        results.append((sim, data))
+        
+    # Sort by descending similarity
+    results.sort(key=lambda x: x[0], reverse=True)
+    
+    return [r[1] for r in results[:limit]]

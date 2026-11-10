@@ -9,8 +9,17 @@ try:
 except ImportError:
     cv2 = None
 
+# EasyOCR is optional — available locally (full quality) but not installed on
+# Render/Railway free tier due to the ~1.5 GB PyTorch dependency.
+# When unavailable, the app falls back to Gemini Vision OCR automatically.
+try:
+    import easyocr as _easyocr_module
+    _EASYOCR_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _easyocr_module = None  # type: ignore
+    _EASYOCR_AVAILABLE = False
+
 import httpx
-import easyocr
 import fitz  # PyMuPDF
 import numpy as np
 from PIL import Image
@@ -30,7 +39,7 @@ except ImportError:  # pragma: no cover - environment dependent
 
 OCR_TEXT_THRESHOLD = 20
 OCR_LANGUAGES = ["en"]
-_ocr_reader: Optional[easyocr.Reader] = None
+_ocr_reader: Optional[object] = None  # easyocr.Reader when available
 OCR_CONFIG_DEFAULT = {"detail": 1, "paragraph": True}
 OCR_CONFIG_HANDWRITING = {
     "detail": 1,
@@ -47,11 +56,14 @@ OCR_MIN_GOOD_SCORE = 0.48
 
 HF_TROCR_URL = "https://api-inference.huggingface.co/models/microsoft/trocr-base-handwritten"
 
-def _get_ocr_reader() -> easyocr.Reader:
-    """Lazily initialize EasyOCR reader to avoid startup overhead."""
+def _get_ocr_reader():
+    """Lazily initialize EasyOCR reader to avoid startup overhead.
+    Returns None when EasyOCR is not installed (e.g. on Render free tier)."""
     global _ocr_reader
+    if not _EASYOCR_AVAILABLE:
+        return None
     if _ocr_reader is None:
-        _ocr_reader = easyocr.Reader(OCR_LANGUAGES, gpu=False)
+        _ocr_reader = _easyocr_module.Reader(OCR_LANGUAGES, gpu=False)
     return _ocr_reader
 
 def get_page_count(file_bytes: bytes) -> int:
@@ -225,11 +237,15 @@ def _decode_text(file_bytes: bytes) -> str:
 def _run_easyocr(img_bytes: bytes) -> tuple[str, float]:
     """
     Run OCR on image bytes and return extracted text with average confidence.
+    Returns ("", 0.0) when EasyOCR is not installed — caller should use Gemini Vision fallback.
 
     Returns:
         tuple[str, float]: (text, confidence)
     """
     reader = _get_ocr_reader()
+    if reader is None:
+        # EasyOCR not installed (e.g. Render free tier) — signal caller to use Gemini Vision
+        return "", 0.0
     image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     image_np = np.array(image)
     gray_np = np.array(image.convert("L"))
@@ -390,19 +406,59 @@ async def extract_pdf(file_bytes: bytes) -> dict:
 
 
 async def extract_image(img_bytes: bytes, page_ref: str = "img") -> dict:
-    """Extract text from images using EasyOCR."""
+    """Extract text from images.
+    
+    Priority order:
+      1. EasyOCR (local dev — highest quality for handwriting)
+      2. Gemini Vision OCR (production fallback — free, no extra dependencies)
+    """
     import asyncio
     try:
         text, conf = await asyncio.to_thread(_run_easyocr, img_bytes)
-        return {"text": text, "ocr_used": True, "confidence": conf, "pageRef": page_ref}
+        if text.strip():
+            # EasyOCR succeeded
+            return {"text": text, "ocr_used": True, "confidence": conf, "pageRef": page_ref}
+        # EasyOCR unavailable or returned nothing — fall back to Gemini Vision
+        logger.info(f"EasyOCR returned empty for {page_ref} ({'not installed' if not _EASYOCR_AVAILABLE else 'low confidence'}). Falling back to Gemini Vision OCR.")
+        return await _extract_image_gemini_vision(img_bytes, page_ref)
     except Exception as e:
+        logger.warning(f"EasyOCR failed for {page_ref} ({e}). Falling back to Gemini Vision OCR.")
+        return await _extract_image_gemini_vision(img_bytes, page_ref)
+
+
+async def _extract_image_gemini_vision(img_bytes: bytes, page_ref: str = "img") -> dict:
+    """Gemini Vision OCR fallback — works on all environments, completely free."""
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        prompt = (
+            "You are an OCR engine. Extract ALL text from this image exactly as written. "
+            "Preserve paragraphs and line breaks. Output only the extracted text, nothing else."
+        )
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    genai_types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                    prompt,
+                ],
+            ),
+        )
+        text = (response.text or "").strip()
         return {
-            "text": "",
+            "text": text,
             "ocr_used": True,
-            "confidence": 0.0,
+            "confidence": 0.85 if text else 0.0,
             "pageRef": page_ref,
-            "error": str(e),
+            "ocr_engine": "gemini-vision",
         }
+    except Exception as e:
+        logger.error(f"Gemini Vision OCR also failed for {page_ref}: {e}")
+        return {"text": "", "ocr_used": True, "confidence": 0.0, "pageRef": page_ref, "error": str(e)}
 
 
 def extract_docx(file_bytes: bytes) -> dict:
