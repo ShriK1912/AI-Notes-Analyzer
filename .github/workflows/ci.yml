@@ -1,0 +1,72 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend-lint-and-test:
+    name: Backend CI (Python 3.11)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest flake8
+
+      - name: Python Syntax & Lint Check
+        run: |
+          # Stop build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,.venv
+          # Verify clean compilation of all modules
+          python -m compileall app/
+
+      - name: Verify Backend Module Imports
+        env:
+          GEMINI_API_KEY: "dummy-ci-key-for-import-verification"
+          FIREBASE_SERVICE_ACCOUNT_JSON: '{"type":"service_account","project_id":"ai-notes-analyser"}'
+        run: |
+          python -c "from app.main import app; print('Backend FastAPI app initializes cleanly!')"
+
+  frontend-build:
+    name: Frontend CI (Node.js 20 & Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Build Frontend Bundle (TypeScript + Vite)
+        env:
+          VITE_API_URL: "https://ai-notes-analyzer.onrender.com"
+          VITE_FIREBASE_PROJECT_ID: "ai-notes-analyser"
+        run: npm run build

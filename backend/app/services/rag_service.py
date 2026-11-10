@@ -18,46 +18,17 @@ CONFIDENCE_THRESHOLDS = {"NOT_FOUND": 0.35, "LOW": 0.55, "MEDIUM": 0.75, "HIGH":
 GENERATION_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite"]
 GENERATION_MODEL = GENERATION_MODELS[0]
 
+from app.services.gemini_pool import gemini_pool
+
 class RAGError(Exception):
     pass
 
-print(f"DEBUG: rag_service initializing with key: {settings.GEMINI_API_KEY[:10]}...")
-_client = genai.Client(api_key=settings.GEMINI_API_KEY)
-
-MAX_GEN_RETRIES = 4
-GEN_BASE_DELAY = 2.0  # seconds
-
 async def _generate_with_retry(prompt: str) -> str:
-    """Call Gemini generation with multi-model fallback and backoff on 503/429 errors."""
-    last_error = None
-    for attempt in range(MAX_GEN_RETRIES):
-        for model in GENERATION_MODELS:
-            try:
-                loop = asyncio.get_running_loop()
-                response = await loop.run_in_executor(
-                    None, lambda m=model: _client.models.generate_content(model=m, contents=prompt)
-                )
-                text = (response.text or "").strip()
-                if text:
-                    return text
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                    logger.warning(f"Model {model} hit transient error ({error_str[:80]}). Trying fallback/retry...")
-                    continue
-                else:
-                    raise
-        
-        # If all models hit quota/capacity, back off before next attempt
-        wait = GEN_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-        retry_match = re.search(r"'retryDelay':\s*'(\d+)s'", str(last_error))
-        if retry_match:
-            wait = min(int(retry_match.group(1)) + 1, 60)
-        logger.warning(f"Gemini API attempt {attempt+1}/{MAX_GEN_RETRIES} failed ({str(last_error)[:80]}). Retrying in {wait:.1f}s...")
-        await asyncio.sleep(wait)
-
-    raise RAGError(f"Gemini API failed after {MAX_GEN_RETRIES} retries: {last_error}")
+    """Call Gemini generation using resilient key-pool and multi-model failover."""
+    try:
+        return await gemini_pool.generate_content_with_failover(prompt)
+    except Exception as e:
+        raise RAGError(str(e))
 
 async def _generate_multi_queries(query: str, subject_name: str) -> list[str]:
     # To conserve the 5 requests-per-minute Free Tier quota, avoid burning an extra LLM call

@@ -141,77 +141,21 @@ async def embed_queries(queries: list[str]) -> list[list[float]]:
 
 async def _embed_with_retry(texts: list[str], task_type: str) -> list[list[float]]:
     """
-    Helper function to embed texts with exponential backoff retry logic.
-    
-    Args:
-        texts: List of text strings to embed
-        task_type: Either TASK_TYPE_DOC or TASK_TYPE_QUERY
-        
-    Returns:
-        List of embedding vectors
-        
-    Raises:
-        EmbeddingError: If all retries fail
+    Embed texts with automatic multi-account key failover, model fallback, and retry.
     """
-    last_error: Exception | None = None
-
-    for model_name in EMBEDDING_MODELS:
-        for attempt in range(MAX_RETRIES):
-            try:
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda m=model_name: _client.models.embed_content(
-                        model=m,
-                        contents=texts,
-                        config=genai_types.EmbedContentConfig(task_type=task_type),
-                    )
-                )
-                embeddings = result.embeddings  # list of ContentEmbedding objects
-                
-                # Firestore has a hard limit of 2048 dimensions.
-                # If a model like gemini-embedding-001 outputs 3072 dimensions, we MUST truncate it.
-                vecs = []
-                for e in embeddings:
-                    val_list = list(e.values)
-                    if len(val_list) > EMBEDDING_DIM:
-                        val_list = val_list[:EMBEDDING_DIM]
-                    vecs.append(val_list)
-                    
-                _sync_embedding_dim(vecs)
-                return vecs
-
-            except Exception as e:
-                last_error = e
-                error_text = str(e)
-                logger.warning(
-                    "Embedding attempt %d/%d failed for %s: %s",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    model_name,
-                    error_text,
-                )
-
-                # If model is not available for this API key/version, fail over quickly.
-                if "not found" in error_text.lower() or "404" in error_text:
-                    break
-
-                if attempt < MAX_RETRIES - 1:
-                    wait_time = RETRY_DELAY * (2 ** attempt)
-                    
-                    # Try to parse exact requested delay from Gemini 429 errors (e.g. "'retryDelay': '44s'")
-                    import re
-                    retry_match = re.search(r"'retryDelay':\s*'(\d+)s'", error_text)
-                    if retry_match:
-                        requested_delay = int(retry_match.group(1))
-                        logger.warning(f"Rate limited! Gemini requested a delay of {requested_delay}s. Sleeping...")
-                        wait_time = requested_delay + 2  # Add 2s buffer
-                        
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error("Embedding failed after %d retries for model %s", MAX_RETRIES, model_name)
-
-    raise EmbeddingError(f"Failed to embed texts: {last_error}")
+    from app.services.gemini_pool import gemini_pool
+    try:
+        vecs = await gemini_pool.embed_texts_with_failover(
+            texts=texts,
+            task_type=task_type,
+            max_dim=EMBEDDING_DIM,
+            models=EMBEDDING_MODELS,
+            max_retries=MAX_RETRIES,
+        )
+        _sync_embedding_dim(vecs)
+        return vecs
+    except Exception as e:
+        raise EmbeddingError(f"Failed to embed texts across key pool: {e}") from e
 
 def validate_embedding(embedding: list[float]) -> bool:
     """Validate embedding vector quality."""

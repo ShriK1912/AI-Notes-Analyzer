@@ -57,10 +57,11 @@ async def run_ocr_pipeline(
                     "ocr_used": page_result["ocr_used"]
                 })
                 
-                # Update progress in Firestore
+                # Update progress and heartbeat in Firestore
                 job_ref.update({
                     "pages_done": page_num + 1,
                     "result": results,
+                    "heartbeat": firestore.SERVER_TIMESTAMP,
                     "updated_at": firestore.SERVER_TIMESTAMP
                 })
                 

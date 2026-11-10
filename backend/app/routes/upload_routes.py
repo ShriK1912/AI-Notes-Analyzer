@@ -104,15 +104,19 @@ async def upload_document(
     total_pages = get_page_count(file_bytes)
     job_id = str(uuid.uuid4())
 
-    # Initialize job document in Firestore
+    # Initialize job document in Firestore with resilience metadata
     job_data = {
         "job_id": job_id,
         "user_id": user_id,
+        "subject_id": subjectId,
         "status": "pending",
         "file_name": filename,
         "pages_total": total_pages,
         "pages_done": 0,
         "pages_failed": [],
+        "attempts": 1,
+        "max_attempts": 3,
+        "heartbeat": firestore.SERVER_TIMESTAMP,
         "result": [],
         "created_at": firestore.SERVER_TIMESTAMP,
         "updated_at": firestore.SERVER_TIMESTAMP,

@@ -17,41 +17,11 @@ GENERATION_MODEL = GENERATION_MODELS[0]
 MAX_GEN_RETRIES = 4
 GEN_BASE_DELAY = 2.0
 
-def _get_client():
-    return genai.Client(api_key=settings.GEMINI_API_KEY)
+from app.services.gemini_pool import gemini_pool
 
 async def _generate_with_retry(prompt: str, json_mode: bool = False) -> str:
-    """Call Gemini with multi-model fallback and backoff on 503/429 errors."""
-    client = _get_client()
-    last_error = None
-    config = genai_types.GenerateContentConfig(response_mime_type="application/json") if json_mode else None
-    for attempt in range(MAX_GEN_RETRIES):
-        for model in GENERATION_MODELS:
-            try:
-                loop = asyncio.get_running_loop()
-                resp = await loop.run_in_executor(
-                    None, lambda m=model: client.models.generate_content(
-                        model=m, contents=prompt, config=config
-                    )
-                )
-                text = (resp.text or "").strip()
-                if text:
-                    return text
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                    logger.warning(f"Model {model} hit transient error: {error_str[:80]}. Trying fallback...")
-                    continue
-                else:
-                    raise
-        wait = GEN_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
-        retry_match = re.search(r"'retryDelay':\s*'(\d+)s'", str(last_error))
-        if retry_match:
-            wait = min(int(retry_match.group(1)) + 1, 60)
-        logger.warning(f"Gemini API attempt {attempt+1}/{MAX_GEN_RETRIES} failed. Retrying in {wait:.1f}s...")
-        await asyncio.sleep(wait)
-    raise Exception(f"Gemini API failed after {MAX_GEN_RETRIES} retries: {last_error}")
+    """Call Gemini with key pooling, multi-model fallback, and backoff on 503/429 errors."""
+    return await gemini_pool.generate_content_with_failover(prompt, json_mode=json_mode)
 
 async def _identify_key_concepts(subject_id: str, user_id: str) -> List[str]:
     db = get_db()

@@ -431,8 +431,10 @@ async def _extract_image_gemini_vision(img_bytes: bytes, page_ref: str = "img") 
     try:
         from google import genai
         from google.genai import types as genai_types
+        from app.services.gemini_pool import gemini_pool
 
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        slot = gemini_pool.get_healthy_slot()
+        client = slot.client if slot else genai.Client(api_key=settings.GEMINI_API_KEY)
         prompt = (
             "You are an OCR engine. Extract ALL text from this image exactly as written. "
             "Preserve paragraphs and line breaks. Output only the extracted text, nothing else."
@@ -448,6 +450,8 @@ async def _extract_image_gemini_vision(img_bytes: bytes, page_ref: str = "img") 
                 ],
             ),
         )
+        if slot:
+            slot.mark_success()
         text = (response.text or "").strip()
         return {
             "text": text,

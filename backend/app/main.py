@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 
@@ -7,10 +8,14 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.routes import upload_routes, chat_routes, study_routes
+from app.utils.structured_logger import setup_structured_logging
+from app.services.job_recovery_service import recover_stale_jobs
 
 import firebase_admin
 from firebase_admin import credentials
 
+# Initialize production-grade structured JSON logging
+setup_structured_logging()
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager
@@ -58,6 +63,9 @@ async def lifespan(_: FastAPI):
                 except Exception as inner_e:
                     logger.warning(f"No Firebase credentials found ({inner_e}). Booting in demo mode — Firestore writes will fail.")
                     firebase_admin.initialize_app(options={'projectId': 'demo-project'})
+
+        # Cloud maturity: launch stale-job recovery sweep on container startup/spin-up
+        asyncio.create_task(recover_stale_jobs())
 
     except Exception as e:
         logger.warning(f"Firebase Admin initialization failed: {e}")

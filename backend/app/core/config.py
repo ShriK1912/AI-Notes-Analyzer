@@ -7,8 +7,9 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "AskMyNotes"
     API_V1_STR: str = "/api/v1"
     
-    # Gemini API
+    # Gemini API (single key or comma-separated pool: key1,key2,key3)
     GEMINI_API_KEY: str = ""
+    GEMINI_API_KEYS: str = ""
     HF_TOKEN: str = ""
     
     # Firebase Service Account
