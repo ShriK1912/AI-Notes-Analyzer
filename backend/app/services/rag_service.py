@@ -9,12 +9,12 @@ from app.core.config import settings
 
 from firebase_admin import firestore
 
-from app.services.embedding_service import embed_query
+from app.services.embedding_service import embed_query, embed_queries
 
 logger = logging.getLogger(__name__)
 
 NOT_FOUND_TEMPLATE = "Not found in your notes for {subject_name}"
-CONFIDENCE_THRESHOLDS = {"NOT_FOUND": 0.35, "LOW": 0.55, "MEDIUM": 0.75, "HIGH": 1.00}
+CONFIDENCE_THRESHOLDS = {"NOT_FOUND": 0.35, "LOW": 0.55, "MEDIUM": 0.75, "HIGH": 0.85}
 GENERATION_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite"]
 GENERATION_MODEL = GENERATION_MODELS[0]
 
@@ -36,15 +36,27 @@ async def _generate_multi_queries(query: str, subject_name: str) -> list[str]:
     return [query]
 
 def _preprocess_query(query: str):
+    if not query or not isinstance(query, str) or not query.strip():
+        raise RAGError("Query must be a non-empty string")
     query = re.sub(r'\s+', ' ', query).strip()
     query = re.sub(r'^[?!]+\s*', '', query)
     stop_words = {'what', 'is', 'the', 'a', 'an', 'are', 'and', 'or'}
     keywords = [w.strip('.,?!:;()[]{}') for w in query.lower().split() if w.strip('.,?!:;()[]{}') not in stop_words and len(w)>2]
     return query, keywords
 
-def compute_confidence(similarities, query_keywords, chunk_texts):
-    if not similarities: return {"tier": "NOT_FOUND", "score": 0.0, "maxScore": 0.0}
+def compute_confidence(similarities, query_keywords=None, chunk_texts=None):
+    if not similarities:
+        return {
+            "tier": "NOT_FOUND",
+            "score": 0.0,
+            "maxScore": 0.0,
+            "avgScore": 0.0,
+            "minScore": 0.0,
+            "variance": 0.0,
+            "keywordBonus": 0.0,
+        }
     max_s = max(similarities)
+    min_s = min(similarities)
     avg_s = sum(similarities) / len(similarities)
     var = sum((s - avg_s) ** 2 for s in similarities) / len(similarities)
     bonus = 0.0
@@ -53,10 +65,62 @@ def compute_confidence(similarities, query_keywords, chunk_texts):
         bonus = min(0.05, (matches / len(chunk_texts)) * 0.10)
     w = max(0.0, min(1.0, 0.75 * max_s + 0.25 * avg_s + bonus - (0.15 * var)))
     tier = "NOT_FOUND"
-    if w >= CONFIDENCE_THRESHOLDS["HIGH"]: tier = "HIGH"
-    elif w >= CONFIDENCE_THRESHOLDS["MEDIUM"]: tier = "MEDIUM"
-    elif w >= CONFIDENCE_THRESHOLDS["LOW"]: tier = "LOW"
-    return {"tier": tier, "score": round(w, 4), "maxScore": round(max_s, 4)}
+    if w >= CONFIDENCE_THRESHOLDS["HIGH"]:
+        tier = "HIGH"
+    elif w >= CONFIDENCE_THRESHOLDS["MEDIUM"]:
+        tier = "MEDIUM"
+    elif w >= CONFIDENCE_THRESHOLDS["LOW"]:
+        tier = "LOW"
+    return {
+        "tier": tier,
+        "score": round(w, 4),
+        "maxScore": round(max_s, 4),
+        "avgScore": round(avg_s, 4),
+        "minScore": round(min_s, 4),
+        "variance": round(var, 4),
+        "keywordBonus": round(bonus, 4),
+    }
+
+def extract_citations(answer: str, chunks: list[dict]) -> list[dict]:
+    """Extract and validate [SOURCE: filename, location] citations from LLM answer."""
+    citations = []
+    seen_cites = set()
+    for fn, loc in re.findall(r"\[SOURCE:\s*(.*?),\s*(.*?)\]", answer):
+        fn, loc = fn.strip(), loc.strip()
+        if (fn, loc) in seen_cites:
+            continue
+        for c in chunks:
+            c_file = c.get("fileName", "")
+            if (c_file == fn or c_file.endswith(fn) or fn.endswith(c_file)) and c.get("locationRef") == loc:
+                citations.append({
+                    "fileName": c["fileName"],
+                    "locationRef": loc,
+                    "chunkId": c.get("chunkId", ""),
+                    "sourceFormat": c.get("sourceFormat"),
+                })
+                seen_cites.add((fn, loc))
+                break
+    return citations
+
+def build_sources_block(chunks: list[dict]) -> str:
+    """Format document chunks into prompt sources block."""
+    blocks = []
+    for i, c in enumerate(chunks):
+        blocks.append(
+            f"[SOURCE {i+1}]\nFile: {c.get('fileName')}\nLocation: {c.get('locationRef')}\nFormat: {c.get('sourceFormat', 'unknown')}\nContent:\n{c.get('text')}"
+        )
+    return "\n---\n".join(blocks)
+
+def _deduplicate_chunks(chunks: list[dict]) -> list[dict]:
+    """Deduplicate chunks by text content or chunkId preserving order."""
+    seen = set()
+    deduped = []
+    for c in chunks:
+        key = c.get("text") or c.get("chunkId")
+        if key not in seen:
+            deduped.append(c)
+            seen.add(key)
+    return deduped
 
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
@@ -87,12 +151,7 @@ async def ask_question(query: str, subject_id: str, subject_name: str, user_id: 
             return {"answer": NOT_FOUND_TEMPLATE.format(subject_name=subject_name), "confidenceTier": "NOT_FOUND", "confidenceScore": 0.0, "citations": [], "evidenceSnippets": [], "topChunkIds": []}
 
         # Deduplicate
-        seen = set()
-        deduped = []
-        for c in scored_chunks:
-            if c["chunkId"] not in seen:
-                deduped.append(c)
-                seen.add(c["chunkId"])
+        deduped = _deduplicate_chunks(scored_chunks)
 
         # Sort by similarity and take top 5
         deduped.sort(key=lambda x: x["similarity"], reverse=True)
@@ -110,7 +169,7 @@ async def ask_question(query: str, subject_id: str, subject_name: str, user_id: 
         pass
 
     # Build Prompt
-    sources = "\n---\n".join([f"[SOURCE {i+1}]\nFile: {c.get('fileName')}\nLocation: {c.get('locationRef')}\nContent:\n{c.get('text')}" for i, c in enumerate(chunk_dicts)])
+    sources = build_sources_block(chunk_dicts)
     hist = "\n".join([f"{'User' if t.get('role')=='user' else 'Teacher'}: {t.get('content')}" for t in (history or [])[-5:]])
     prompt = f"RULES:\n1. ONLY use sources below. If not found, output EXACTLY: {NOT_FOUND_TEMPLATE.format(subject_name=subject_name)}\n2. Cite sources using [SOURCE: filename, location].\n3. Confidence is {conf['tier']}.\nHISTORY:\n{hist}\nSOURCES:\n{sources}\nQUERY: {query}"
 
@@ -120,16 +179,7 @@ async def ask_question(query: str, subject_id: str, subject_name: str, user_id: 
         raise RAGError(f"Gen failed: {e}")
 
     # Extract citations
-    citations = []
-    seen_cites = set()
-    for fn, loc in re.findall(r"\[SOURCE:\s*(.*?),\s*(.*?)\]", ans):
-        fn, loc = fn.strip(), loc.strip()
-        if (fn, loc) in seen_cites: continue
-        for c in chunk_dicts:
-            if c.get("fileName", "").endswith(fn) and c.get("locationRef") == loc:
-                citations.append({"fileName": c["fileName"], "locationRef": loc, "chunkId": c["chunkId"], "sourceFormat": c.get("sourceFormat")})
-                seen_cites.add((fn, loc))
-                break
+    citations = extract_citations(ans, chunk_dicts)
 
     return {
         "answer": ans, "confidenceTier": conf["tier"], "confidenceScore": conf["score"],

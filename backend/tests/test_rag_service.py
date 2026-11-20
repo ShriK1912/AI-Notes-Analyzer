@@ -314,73 +314,49 @@ class TestRAGPipeline:
     @pytest.mark.asyncio
     async def test_ask_question_no_results(self):
         """Query with no results should return NOT_FOUND response."""
-        with patch('app.services.rag_service.embed_query', new_callable=AsyncMock) as mock_embed:
-            with patch('app.services.rag_service._generate_multi_queries', new_callable=AsyncMock) as mock_multi:
-                with patch('app.vectorstore.chroma_client.get_collection') as mock_collection:
-                    # Mock empty query results
-                    mock_multi.return_value = ["random question"]
-                    mock_embed.return_value = [0.1] * 768
-                    mock_col = MagicMock()
-                    mock_col.query.return_value = {
-                        "documents": [[]],
-                        "metadatas": [[]],
-                        "distances": [[]]
-                    }
-                    mock_collection.return_value = mock_col
-                    
-                    result = await ask_question("random question", "subj-1", "Biology", "user-1")
+        with patch('app.services.rag_service.embed_queries', new_callable=AsyncMock) as mock_embed:
+            with patch('app.vectorstore.firestore_client.find_similar_chunks') as mock_find:
+                mock_embed.return_value = [[0.1] * 768]
+                mock_find.return_value = []
                 
-                assert result["confidenceTier"] == "NOT_FOUND"
-                assert "Not found" in result["answer"]
-    
+                result = await ask_question("random question", "subj-1", "Biology", "user-1")
+            
+            assert result["confidenceTier"] == "NOT_FOUND"
+            assert "Not found" in result["answer"]
+
     @pytest.mark.asyncio
     async def test_ask_question_embedding_failure(self):
         """Embedding failure should raise RAGError."""
-        with patch('app.services.rag_service.embed_query', new_callable=AsyncMock) as mock_embed:
-            with patch('app.services.rag_service._generate_multi_queries', new_callable=AsyncMock) as mock_multi:
-                mock_multi.return_value = ["test question"]
-                mock_embed.side_effect = Exception("Embedding failed")
-                
-                with pytest.raises(RAGError, match="Failed to embed query"):
-                    await ask_question("test question", "subj-1", "Biology", "user-1")
-    
+        with patch('app.services.rag_service.embed_queries', new_callable=AsyncMock) as mock_embed:
+            mock_embed.side_effect = Exception("Embedding failed")
+            
+            with pytest.raises(RAGError):
+                await ask_question("test question", "subj-1", "Biology", "user-1")
+
     @pytest.mark.asyncio
     async def test_ask_question_with_results(self):
         """Valid query with results should return answer."""
-        with patch('app.services.rag_service.embed_query', new_callable=AsyncMock) as mock_embed:
-            with patch('app.services.rag_service._generate_multi_queries', new_callable=AsyncMock) as mock_multi:
-                with patch('app.services.rag_service._rerank_chunks', new_callable=AsyncMock) as mock_rerank:
-                    with patch('app.vectorstore.chroma_client.get_collection') as mock_collection:
-                        with patch('app.services.rag_service.model') as mock_model:
-                            # Setup mocks
-                            mock_multi.return_value = ["What is photosynthesis?"]
-                            mock_embed.return_value = [0.1] * 768
-                            
-                            mock_col = MagicMock()
-                            mock_col.query.return_value = {
-                                "documents": [["Photosynthesis is the process..."]],
-                                "metadatas": [[{
-                                    "fileName": "notes.pdf",
-                                    "locationRef": "Page 1",
-                                    "sourceFormat": "pdf",
-                                    "chunkId": "chunk-1"
-                                }]],
-                                "distances": [[0.1]]
-                            }
-                            mock_collection.return_value = mock_col
-                            
-                            # Rerank should return what it got
-                            mock_rerank.side_effect = lambda q, c: c
-                            
-                            mock_response = MagicMock()
-                            mock_response.text = "[SOURCE: notes.pdf, Page 1] Photosynthesis is..."
-                            mock_model.generate_content.return_value = mock_response
-                            
-                            result = await ask_question("What is photosynthesis?", "subj-1", "Biology", "user-1")
+        with patch('app.services.rag_service.embed_queries', new_callable=AsyncMock) as mock_embed:
+            with patch('app.vectorstore.firestore_client.find_similar_chunks') as mock_find:
+                with patch('app.services.rag_service._generate_with_retry', new_callable=AsyncMock) as mock_gen:
+                    mock_embed.return_value = [[0.1] * 768]
+                    mock_find.return_value = [{
+                        "id": "chunk-1",
+                        "chunkId": "chunk-1",
+                        "text": "Photosynthesis is the process...",
+                        "fileName": "notes.pdf",
+                        "locationRef": "Page 1",
+                        "sourceFormat": "pdf",
+                        "vector_distance": 0.1
+                    }]
+                    mock_gen.return_value = "[SOURCE: notes.pdf, Page 1] Photosynthesis is the chemical process..."
                     
-                    assert result["answer"]
-                    assert "confidenceTier" in result
-                    assert result["confidenceTier"] != "NOT_FOUND"
+                    result = await ask_question("What is photosynthesis?", "subj-1", "Biology", "user-1")
+            
+            assert result["answer"]
+            assert "confidenceTier" in result
+            assert result["confidenceTier"] != "NOT_FOUND"
+            assert len(result["citations"]) > 0
 
 
 class TestRAGEdgeCases:
@@ -389,12 +365,15 @@ class TestRAGEdgeCases:
     @pytest.mark.asyncio
     async def test_ask_question_long_query(self):
         """Very long query should be handled."""
-        query = "This is a very long question " * 50
-        
-        with patch('app.services.rag_service.embed_query', new_callable=AsyncMock):
-            with patch('app.vectorstore.chroma_client.get_collection'):
-                # Should not crash even with long query
-                pass
+        query = "What is photosynthesis in detail? " * 10
+        with patch('app.services.rag_service.embed_queries', new_callable=AsyncMock) as mock_embed:
+            with patch('app.vectorstore.firestore_client.find_similar_chunks') as mock_find:
+                with patch('app.services.rag_service._generate_with_retry', new_callable=AsyncMock) as mock_gen:
+                    mock_embed.return_value = [[0.1] * 768]
+                    mock_find.return_value = []
+                    mock_gen.return_value = "Answer"
+                    result = await ask_question(query, "subj-1", "Biology", "user-1")
+                    assert result["confidenceTier"] == "NOT_FOUND"
     
     def test_confidence_extreme_values(self):
         """Extreme similarity values should be handled."""

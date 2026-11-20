@@ -35,8 +35,8 @@ def test_extract_visible_text_removes_scripts_and_styles():
     assert "display:none" not in text
 
 
-@pytest.mark.asyncio
-async def test_scrape_url_extracts_html_title_and_text(monkeypatch):
+def test_scrape_url_extracts_html_title_and_text(monkeypatch):
+    import asyncio
     class FakeResponse:
         def __init__(self):
             self.headers = {"content-type": "text/html"}
@@ -59,7 +59,7 @@ async def test_scrape_url_extracts_html_title_and_text(monkeypatch):
             return FakeResponse()
 
     monkeypatch.setattr("app.services.scraping_service.httpx.AsyncClient", FakeClient)
-    result = await scrape_url("https://example.com/lesson")
+    result = asyncio.run(scrape_url("https://example.com/lesson"))
 
     assert result["title"] == "Lesson"
     assert "Energy is conserved." in result["text"]

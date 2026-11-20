@@ -1,0 +1,162 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 1: BACKEND CI (Lint, Compile, 94 Unit Tests)
+  # ─────────────────────────────────────────────────────────────
+  test-backend:
+    name: Backend CI (Python 3.11 & Pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint & Syntax Check
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,.venv
+          python -m compileall app/
+
+      - name: Run Pytest Test Suite
+        env:
+          GEMINI_API_KEY: "dummy-ci-key-for-test-suite"
+          FIREBASE_SERVICE_ACCOUNT_JSON: '{"type":"service_account","project_id":"ai-notes-analyser"}'
+        run: |
+          pytest tests/ -v
+
+      - name: Verify FastAPI App Startup
+        env:
+          GEMINI_API_KEY: "dummy-ci-key-for-import-verification"
+          FIREBASE_SERVICE_ACCOUNT_JSON: '{"type":"service_account","project_id":"ai-notes-analyser"}'
+        run: |
+          python -c "from app.main import app; print('Backend FastAPI app initializes cleanly!')"
+
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 1: FRONTEND CI (Build & Validate Bundle)
+  # ─────────────────────────────────────────────────────────────
+  test-and-build-frontend:
+    name: Frontend CI (Node.js 20 & Vite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies
+        run: npm ci
+
+      - name: Build Frontend Bundle (Vite)
+        env:
+          VITE_API_URL: "https://ai-notes-analyzer.onrender.com"
+          VITE_FIREBASE_PROJECT_ID: "ai-notes-analyser"
+          VITE_RECAPTCHA_V3_SITE_KEY: "6Lfa6RguAAAAAOdvO84jR5C6FtwGf5bq3b_6vWSS"
+        run: npm run build
+
+      - name: Upload Production Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 2: CONTINUOUS DEPLOYMENT (CD) - Firebase Hosting
+  # ─────────────────────────────────────────────────────────────
+  deploy-frontend:
+    name: Deploy Frontend (Firebase Hosting)
+    needs: [test-backend, test-and-build-frontend]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Frontend Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Deploy to Firebase Hosting (Live Channel)
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT != '' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_AI_NOTES_ANALYSER }}
+        with:
+          repoToken: '${{ secrets.GITHUB_TOKEN }}'
+          firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT_AI_NOTES_ANALYSER }}'
+          channelId: live
+          projectId: ai-notes-analyser
+
+      - name: Notice if Firebase Service Account Secret Missing
+        if: ${{ env.FIREBASE_SERVICE_ACCOUNT == '' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_AI_NOTES_ANALYSER }}
+        run: |
+          echo "::warning title=Firebase Hosting CD::Secret FIREBASE_SERVICE_ACCOUNT_AI_NOTES_ANALYSER is not configured yet in GitHub Secrets. Once added, automated deployment to https://ai-notes-analyser.web.app will activate automatically on every push!"
+
+  # ─────────────────────────────────────────────────────────────
+  # STAGE 2: CONTINUOUS DEPLOYMENT (CD) - Render Backend
+  # ─────────────────────────────────────────────────────────────
+  deploy-backend:
+    name: Deploy Backend (Render Web Service)
+    needs: [test-backend, test-and-build-frontend]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Render Deploy Hook
+        if: ${{ env.RENDER_HOOK != '' }}
+        env:
+          RENDER_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          echo "Triggering Render zero-downtime deployment hook..."
+          curl -f -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+          echo "Render deployment triggered successfully!"
+
+      - name: Info on Render Auto-Deploy
+        if: ${{ env.RENDER_HOOK == '' }}
+        env:
+          RENDER_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          echo "RENDER_DEPLOY_HOOK_URL secret is not set. Render will use its default Git push tracking to deploy the new container."

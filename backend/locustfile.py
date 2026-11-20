@@ -42,3 +42,4 @@ class StudentUser(HttpUser):
             files={"file": ("dummy.txt", b"Invalid file payload test for rate checking")},
             name="[Upload] POST /api/v1/upload/ (Validation Check)",
         )
+

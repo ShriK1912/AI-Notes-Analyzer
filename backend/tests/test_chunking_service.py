@@ -66,9 +66,10 @@ class TestChunkText:
             chunk_text(text, incomplete_metadata)
     
     def test_chunk_too_short_text(self, sample_metadata):
-        """Text shorter than minimum size should raise error."""
-        with pytest.raises(ChunkingError, match="too short"):
-            chunk_text("short", sample_metadata)
+        """Text shorter than minimum size should return a single fallback chunk."""
+        chunks = chunk_text("short", sample_metadata)
+        assert len(chunks) == 1
+        assert chunks[0]["text"] == "short"
     
     def test_chunk_preserves_metadata(self, sample_metadata):
         """Chunks should preserve document metadata."""

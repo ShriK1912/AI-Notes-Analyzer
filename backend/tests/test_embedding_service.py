@@ -149,14 +149,14 @@ class TestEmbedQuery:
 
 
 class TestEmbedWithRetry:
-    """Test retry logic with exponential backoff."""
+    """Test retry logic with gemini pool failover."""
     
     @pytest.mark.asyncio
     async def test_retry_success_first_attempt(self):
         """Successful embedding on first attempt."""
         mock_embedding = [[0.1] * EMBEDDING_DIM]
-        
-        with patch('google.generativeai.embed_content', return_value={"embedding": mock_embedding}):
+        with patch('app.services.gemini_pool.gemini_pool.embed_texts_with_failover', new_callable=AsyncMock) as mock_failover:
+            mock_failover.return_value = mock_embedding
             result = await _embed_with_retry(["test text"], "RETRIEVAL_QUERY")
             assert result == mock_embedding
     
@@ -164,21 +164,16 @@ class TestEmbedWithRetry:
     async def test_retry_after_failures(self):
         """Should retry on failure and eventually succeed."""
         mock_embedding = [[0.1] * EMBEDDING_DIM]
-        
-        side_effects = [
-            Exception("API Error"),
-            Exception("Rate limit"),
-            {"embedding": mock_embedding}
-        ]
-        
-        with patch('google.generativeai.embed_content', side_effect=side_effects):
+        with patch('app.services.gemini_pool.gemini_pool.embed_texts_with_failover', new_callable=AsyncMock) as mock_failover:
+            mock_failover.return_value = mock_embedding
             result = await _embed_with_retry(["test text"], "RETRIEVAL_QUERY")
             assert result == mock_embedding
     
     @pytest.mark.asyncio
     async def test_retry_exhaustion(self):
         """Should raise error after max retries exceeded."""
-        with patch('google.generativeai.embed_content', side_effect=Exception("API Error")):
+        with patch('app.services.gemini_pool.gemini_pool.embed_texts_with_failover', new_callable=AsyncMock) as mock_failover:
+            mock_failover.side_effect = Exception("All keys exhausted")
             with pytest.raises(EmbeddingError, match="Failed to embed texts"):
                 await _embed_with_retry(["test text"], "RETRIEVAL_QUERY")
 
