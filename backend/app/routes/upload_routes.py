@@ -101,6 +101,30 @@ async def upload_document(
 
     # Read bytes and metadata in the request thread
     file_bytes = await file.read()
+
+    # -------------------------------------------------------------------
+    # Idempotency guard: prevent duplicate active jobs for the same user
+    # + filename combination. If an active (pending/processing) job exists
+    # for this exact filename we return it instead of spawning a new one.
+    # This protects against double-submit on slow networks.
+    # -------------------------------------------------------------------
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    existing = (
+        db.collection("jobs")
+        .where(filter=FieldFilter("user_id", "==", user_id))
+        .where(filter=FieldFilter("file_name", "==", filename))
+        .where(filter=FieldFilter("status", "in", ["pending", "processing"]))
+        .limit(1)
+        .get()
+    )
+    if existing:
+        existing_job = existing[0].to_dict()
+        logger.info(
+            f"Idempotency hit: returning existing active job {existing_job['job_id']} "
+            f"for user={user_id}, file={filename}"
+        )
+        return {"job_id": existing_job["job_id"], "idempotent": True}
+
     total_pages = get_page_count(file_bytes)
     job_id = str(uuid.uuid4())
 
@@ -139,21 +163,36 @@ async def upload_document(
 
 @router.get("/status/{job_id}")
 async def get_job_status(job_id: str, request: Request):
+    """
+    Poll the status of a background OCR/indexing job.
+
+    Returns the full job document from Firestore so the client can display
+    progress (pages_done / pages_total) and handle completed / failed states.
+    For real-time updates prefer Firestore ``onSnapshot``, but this REST
+    endpoint is provided for compatibility and server-side tooling.
+    """
     db = get_db()
     user_id = resolve_user_id(request)
-    # Note: Status check via GET is less used now with onSnapshot but kept for compatibility
-    # However we'd need subjectId here to find it. For now, since it's just a GET, 
-    # and we want real-time, onSnapshot is the primary path.
-    raise HTTPException(status_code=501, detail="Synchronous status polling deprecated. Use Firestore onSnapshot.")
-    
+
+    doc = db.collection("jobs").document(job_id).get()
     if not doc.exists:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     data = doc.to_dict()
+    # Ownership check — users may only poll their own jobs
     if data.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
-        
-    return data
+
+    # Sanitise Firestore sentinel / timestamp objects before JSON serialisation
+    safe = {}
+    for k, v in data.items():
+        if hasattr(v, "isoformat"):          # datetime
+            safe[k] = v.isoformat()
+        elif hasattr(v, "seconds"):          # Firestore Timestamp
+            safe[k] = datetime.fromtimestamp(v.seconds).isoformat()
+        else:
+            safe[k] = v
+    return safe
 
 @router.post("/url")
 async def upload_url(request: Request, subjectId: str = Form(...), url: str = Form(...)):
